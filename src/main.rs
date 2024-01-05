@@ -116,7 +116,7 @@ mod connection_pool {
         		}
     		};
     		let pconn = PooledConnection {
-        		connection: conn,
+        		connection: Some(conn),
         		permit,
         		pool: self,
     		};
@@ -130,14 +130,16 @@ mod connection_pool {
     }
 
     pub(crate) struct PooledConnection<'a> {
-        connection: Connection,
+        connection: Option<Connection>,
         permit: SemaphorePermit<'a>,
         pool: &'a Pool,
     }
 
     impl<'a> Drop for PooledConnection<'a> {
         fn drop(&mut self) {
-            self.pool.put_back(self.connection);
+            self.pool.put_back(self.connection.take().unwrap());
+        }
+    }
         }
     }
 }
