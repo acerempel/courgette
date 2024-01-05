@@ -75,7 +75,7 @@ mod state {
 }
 
 mod connection_pool {
-    use std::sync::{Arc, Mutex};
+    use std::{sync::{Arc, Mutex}, ops::{DerefMut, Deref}};
 
     use rusqlite::Connection;
     use tokio::{sync::{Semaphore, SemaphorePermit}, task::spawn_blocking};
@@ -140,6 +140,18 @@ mod connection_pool {
             self.pool.put_back(self.connection.take().unwrap());
         }
     }
+
+	impl<'a> Deref for PooledConnection<'a> {
+        type Target = Connection;
+
+        fn deref(&self) -> &Self::Target {
+            self.connection.as_ref().unwrap()
+        }
+    }
+
+    impl<'a> DerefMut for PooledConnection<'a> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.connection.as_mut().unwrap()
         }
     }
 }
