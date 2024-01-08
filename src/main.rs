@@ -53,25 +53,62 @@ mod parse_makefile {
 }
 
 mod state {
+    use std::sync::Arc;
+
     use dashmap::DashMap;
+    use eyre::Report;
     use tokio::sync::Notify;
 
     pub struct State {
         things: DashMap<Key, Value>,
     }
 
-    enum Value {
-        Running(Notify),
-        Finished(Result<Rev, eyre::Report>),
+    impl State {
+        pub(crate) async fn wait_for_key(&self, key: Key) -> Result<Rev, ()> {
+            let mut valref = self.things.get_mut(&key);
+            let val = valref.as_deref_mut();
+            match val {
+                Some(Value::Running(ref notify)) => {
+                    let notify = notify.clone();
+                    drop(valref);
+                    notify.notified().await;
+                    let val = self.things.get(&key);
+                    match val.as_deref() {
+                        Some(Value::Finished(result)) => *result,
+                        oo => panic!("Oh no! {:?}", oo)
+                    }
+                },
+                Some(Value::Finished(result)) => *result,
+                None => {
+                    let notify = Arc::new(Notify::new());
+                    self.things.insert(key, Value::Running(notify.clone()));
+                    drop(valref);
+                    let result = self.build_key(key).await;
+                    if let Err(ref e) = result { eprintln!("{}", e) }
+                    let result = result.map_err(|_| ());
+                    *self.things.get_mut(&key).unwrap() = Value::Finished(result);
+                    notify.notify_waiters();
+                    result
+                }
+            }
+        }
+
+        async fn build_key(&self, key: Key) -> Result<Rev, Report> {
+            todo!()
+        }
     }
 
+    #[derive(Debug)]
+    enum Value {
+        Running(Arc<Notify>),
+        Finished(Result<Rev, ()>),
+    }
+
+    #[derive(Debug, Eq, PartialEq, Clone, Copy)]
     pub(crate) struct Rev(i64);
 
+    #[derive(Hash, Eq, PartialEq, Clone, Debug, Copy)]
     pub(crate) struct Key(i64);
-
-    async fn rebuild(state: &State, key: Key) {
-        todo!()
-    }
 }
 
 mod connection_pool {
