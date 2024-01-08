@@ -75,10 +75,12 @@ mod state {
 }
 
 mod connection_pool {
-    use std::{sync::{Arc, Mutex}, ops::{DerefMut, Deref}};
+    use std::ops::{DerefMut, Deref};
+    use std::sync::{Arc, Mutex};
 
     use rusqlite::Connection;
-    use tokio::{sync::{Semaphore, SemaphorePermit}, task::spawn_blocking};
+    use tokio::task::spawn_blocking;
+    use tokio::sync::{Semaphore, SemaphorePermit};
     use eyre::Report;
 
 	#[derive(Clone)]
