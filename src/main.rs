@@ -114,6 +114,7 @@ mod connection_pool {
         		if let Some(conn) = conns.pop() {
             		conn
         		} else {
+                    drop(conns);
             		Self::new_connection().await?
         		}
     		};
