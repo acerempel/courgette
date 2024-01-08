@@ -53,6 +53,7 @@ mod parse_makefile {
 }
 
 mod state {
+    use std::any::Any;
     use std::sync::Arc;
 
     use dashmap::DashMap;
@@ -60,47 +61,61 @@ mod state {
     use tokio::sync::Notify;
 
     pub struct State {
-        things: DashMap<Key, Value>,
+        things: DashMap<Key, Status>,
     }
 
     impl State {
         pub(crate) async fn wait_for_key(&self, key: Key) -> Result<Rev, Arc<Report>> {
+            fn get_result_rev_changed<E: Clone>(res: &Result<Value, E>) -> Result<Rev, E> {
+                match res {
+                    Ok(status) => Ok(status.changed),
+                    Err(err) => Err(err.clone()),
+                }
+            }
             let mut valref = self.things.get_mut(&key);
             let val = valref.as_deref_mut();
             match val {
-                Some(Value::Running(ref notify)) => {
+                Some(Status::Running(ref notify)) => {
                     let notify = notify.clone();
                     drop(valref);
                     notify.notified().await;
                     let val = self.things.get(&key);
                     match val.as_deref() {
-                        Some(Value::Finished(result)) => result.clone(),
+                        Some(Status::Finished(result)) => get_result_rev_changed(result),
                         oo => panic!("Oh no! {:?}", oo)
                     }
                 },
-                Some(Value::Finished(result)) => result.clone(),
+                Some(Status::Finished(result)) => get_result_rev_changed(result),
                 None => {
                     let notify = Arc::new(Notify::new());
-                    self.things.insert(key, Value::Running(notify.clone()));
+                    self.things.insert(key, Status::Running(notify.clone()));
                     drop(valref);
                     let result = self.build_key(key).await.map_err(Arc::new);
                     if let Err(ref e) = result { eprintln!("{}", e) }
-                    *self.things.get_mut(&key).unwrap() = Value::Finished(result.clone());
+                    let res = get_result_rev_changed(&result);
+                    *self.things.get_mut(&key).unwrap() = Status::Finished(result);
                     notify.notify_waiters();
-                    result
+                    res
                 }
             }
         }
 
-        async fn build_key(&self, key: Key) -> Result<Rev, Report> {
+        async fn build_key(&self, key: Key) -> Result<Value, Report> {
             todo!()
         }
     }
 
     #[derive(Debug)]
-    enum Value {
+    enum Status {
         Running(Arc<Notify>),
-        Finished(Result<Rev, Arc<Report>>),
+        Finished(Result<Value, Arc<Report>>),
+    }
+
+    #[derive(Debug)]
+    struct Value {
+        built: Rev,
+        changed: Rev,
+        value: Box<dyn Any + 'static>,
     }
 
     #[derive(Debug, Eq, PartialEq, Clone, Copy)]
