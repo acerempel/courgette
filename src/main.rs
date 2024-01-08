@@ -93,7 +93,7 @@ mod state {
                     let result = self.build_key(key).await.map_err(Arc::new);
                     if let Err(ref e) = result { eprintln!("{}", e) }
                     let res = get_result_rev_changed(&result);
-                    *self.things.get_mut(&key).unwrap() = Status::Finished(result);
+                    { *self.things.get_mut(&key).unwrap() = Status::Finished(result); }
                     notify.notify_waiters();
                     res
                 }
