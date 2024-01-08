@@ -54,9 +54,11 @@ mod parse_makefile {
 
 mod state {
     use std::any::Any;
+    use std::result;
     use std::sync::Arc;
 
     use dashmap::DashMap;
+    use dashmap::mapref::entry::Entry;
     use eyre::Report;
     use tokio::sync::Notify;
 
@@ -72,31 +74,41 @@ mod state {
                     Err(err) => Err(err.clone()),
                 }
             }
-            let mut valref = self.things.get_mut(&key);
-            let val = valref.as_deref_mut();
-            match val {
-                Some(Status::Running(ref notify)) => {
-                    let notify = notify.clone();
-                    drop(valref);
-                    notify.notified().await;
-                    let val = self.things.get(&key);
-                    match val.as_deref() {
-                        Some(Status::Finished(result)) => get_result_rev_changed(result),
-                        oo => panic!("Oh no! {:?}", oo)
+            // Use entry API so that, if the key is missing, we can insert it while retaining a write lock,
+            // so no one else can insert it between when we check for it and when we insert it
+            let entry = self.things.entry(key);
+            match entry {
+                Entry::Occupied(occ) => {
+                    // We don't need a write lock if the key exists already
+                    let occref = occ.into_ref().downgrade();
+                    match occref.value() {
+                        Status::Running(ref notify) => {
+                            let notify = notify.clone();
+                            // Drop the reference into the map, releasing the lock, before awaiting
+                            drop(occref);
+                            notify.notified().await;
+                            let val = self.things.get(&key);
+                            match val.as_deref() {
+                                Some(Status::Finished(result)) => get_result_rev_changed(result),
+                                oh_no => panic!("Oh no! {:?}", oh_no)
+                            }
+                        },
+                        Status::Finished(result) => get_result_rev_changed(result),
                     }
                 },
-                Some(Status::Finished(result)) => get_result_rev_changed(result),
-                None => {
+                Entry::Vacant(vac) => {
                     let notify = Arc::new(Notify::new());
-                    self.things.insert(key, Status::Running(notify.clone()));
-                    drop(valref);
+                    // Drop the reference into the map (`VacantEntry::insert` consumes `self`), releasing the lock,
+                    // before awaiting
+                    { vac.insert(Status::Running(notify.clone())); }
                     let result = self.build_key(key).await.map_err(Arc::new);
                     if let Err(ref e) = result { eprintln!("{}", e) }
                     let res = get_result_rev_changed(&result);
+                    // Release the reference into the map (write lock) before waking up dependents
                     { *self.things.get_mut(&key).unwrap() = Status::Finished(result); }
                     notify.notify_waiters();
                     res
-                }
+                },
             }
         }
 
