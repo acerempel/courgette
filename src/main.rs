@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables)]
 use std::hash::{Hasher, Hash};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -54,7 +55,6 @@ mod parse_makefile {
 
 mod state {
     use std::any::Any;
-    use std::result;
     use std::sync::Arc;
 
     use dashmap::DashMap;
