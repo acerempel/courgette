@@ -64,7 +64,7 @@ mod state {
     }
 
     impl State {
-        pub(crate) async fn wait_for_key(&self, key: Key) -> Result<Rev, ()> {
+        pub(crate) async fn wait_for_key(&self, key: Key) -> Result<Rev, Arc<Report>> {
             let mut valref = self.things.get_mut(&key);
             let val = valref.as_deref_mut();
             match val {
@@ -74,19 +74,18 @@ mod state {
                     notify.notified().await;
                     let val = self.things.get(&key);
                     match val.as_deref() {
-                        Some(Value::Finished(result)) => *result,
+                        Some(Value::Finished(result)) => result.clone(),
                         oo => panic!("Oh no! {:?}", oo)
                     }
                 },
-                Some(Value::Finished(result)) => *result,
+                Some(Value::Finished(result)) => result.clone(),
                 None => {
                     let notify = Arc::new(Notify::new());
                     self.things.insert(key, Value::Running(notify.clone()));
                     drop(valref);
-                    let result = self.build_key(key).await;
+                    let result = self.build_key(key).await.map_err(Arc::new);
                     if let Err(ref e) = result { eprintln!("{}", e) }
-                    let result = result.map_err(|_| ());
-                    *self.things.get_mut(&key).unwrap() = Value::Finished(result);
+                    *self.things.get_mut(&key).unwrap() = Value::Finished(result.clone());
                     notify.notify_waiters();
                     result
                 }
@@ -101,7 +100,7 @@ mod state {
     #[derive(Debug)]
     enum Value {
         Running(Arc<Notify>),
-        Finished(Result<Rev, ()>),
+        Finished(Result<Rev, Arc<Report>>),
     }
 
     #[derive(Debug, Eq, PartialEq, Clone, Copy)]
