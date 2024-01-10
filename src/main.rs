@@ -115,6 +115,15 @@ mod state {
         async fn build_key(&self, key: Key) -> Result<Value, Report> {
             todo!()
         }
+
+        async fn check_depends(key: Key, last_built: Rev) -> DependencyStatus {
+            todo!()
+        }
+    }
+
+    pub enum DependencyStatus {
+        Changed,
+        Same,
     }
 
     #[derive(Debug)]
