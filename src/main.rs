@@ -63,12 +63,24 @@ mod state {
     use dashmap::DashMap;
     use eyre::Report;
     use tokio::sync::Notify;
+    use tokio::task::JoinSet;
 
-    pub struct State {
-        things: DashMap<Key, Status>,
+    use crate::connection_pool::Pool;
+
+    #[derive(Clone)]
+    pub struct Shared {
+        inner: Arc<Inner>,
     }
 
-    impl State {
+    struct Inner {
+        things: DashMap<Key, Status>,
+        pool: Pool,
+    }
+
+    impl Shared {
+        fn things(&self) -> &DashMap<Key, Status> {
+            &self.inner.things
+        }
         pub(crate) async fn wait_for_key(&self, key: Key) -> Result<Rev, Arc<Report>> {
             fn get_result_rev_changed<E: Clone>(res: &Result<Value, E>) -> Result<Rev, E> {
                 match res {
@@ -78,7 +90,7 @@ mod state {
             }
             // Use entry API so that, if the key is missing, we can insert it while retaining a write lock,
             // so no one else can insert it between when we check for it and when we insert it
-            let entry = self.things.entry(key);
+            let entry = self.things().entry(key);
             match entry {
                 Entry::Occupied(occ) => {
                     // We don't need a write lock if the key exists already
@@ -89,7 +101,7 @@ mod state {
                             // Drop the reference into the map, releasing the lock, before awaiting
                             drop(occref);
                             notify.notified().await;
-                            let val = self.things.get(&key);
+                            let val = self.things().get(&key);
                             match val.as_deref() {
                                 Some(Status::Finished(result)) => get_result_rev_changed(result),
                                 oh_no => panic!("Oh no! {:?}", oh_no),
@@ -112,7 +124,7 @@ mod state {
                     let res = get_result_rev_changed(&result);
                     {
                         // Release the reference into the map (write lock) before waking up dependents
-                        *self.things.get_mut(&key).unwrap() = Status::Finished(result);
+                        *self.things().get_mut(&key).unwrap() = Status::Finished(result);
                     }
                     notify.notify_waiters();
                     res
@@ -124,7 +136,21 @@ mod state {
             todo!()
         }
 
-        async fn check_depends(key: Key, last_built: Rev) -> DependencyStatus {
+        async fn check_depends(
+            &self,
+            key: Key,
+            last_built: Rev,
+        ) -> Result<DependencyStatus, Report> {
+            let deps = self.get_depends(key).await?;
+            let mut dep_tasks = JoinSet::new();
+            for dep in deps {
+                let shared = self.clone();
+                dep_tasks.spawn(async move { shared.wait_for_key(dep).await });
+            }
+            Ok(DependencyStatus::Same)
+        }
+
+        async fn get_depends(&self, key: Key) -> Result<Vec<Key>, Report> {
             todo!()
         }
     }
@@ -144,7 +170,7 @@ mod state {
     struct Value {
         built: Rev,
         changed: Rev,
-        value: Box<dyn Any + 'static>,
+        value: Box<dyn Any + Send + Sync + 'static>,
     }
 
     #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -156,25 +182,18 @@ mod state {
 
 mod connection_pool {
     use std::ops::{Deref, DerefMut};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     use eyre::Report;
     use rusqlite::Connection;
     use tokio::sync::{Semaphore, SemaphorePermit};
     use tokio::task::spawn_blocking;
 
-    #[derive(Clone)]
-    pub(crate) struct Pool {
-        inner: Arc<Inner>,
-    }
-
     impl Pool {
         fn new(max_conns: usize) -> Self {
             Self {
-                inner: Arc::new(Inner {
-                    semaphore: Semaphore::new(max_conns),
-                    connections: Mutex::new(Vec::with_capacity(max_conns)),
-                }),
+                semaphore: Semaphore::new(max_conns),
+                connections: Mutex::new(Vec::with_capacity(max_conns)),
             }
         }
 
@@ -183,14 +202,14 @@ mod connection_pool {
         }
 
         fn put_back(&self, conn: Connection) {
-            let mut conns = self.inner.connections.lock().unwrap();
+            let mut conns = self.connections.lock().unwrap();
             conns.push(conn);
         }
 
         pub(crate) async fn acquire(&self) -> Result<PooledConnection<'_>, Report> {
-            let permit = self.inner.semaphore.acquire().await?;
+            let permit = self.semaphore.acquire().await?;
             let conn = {
-                let mut conns = self.inner.connections.lock().unwrap();
+                let mut conns = self.connections.lock().unwrap();
                 if let Some(conn) = conns.pop() {
                     conn
                 } else {
@@ -207,7 +226,7 @@ mod connection_pool {
         }
     }
 
-    struct Inner {
+    pub(crate) struct Pool {
         semaphore: Semaphore,
         connections: Mutex<Vec<Connection>>,
     }
