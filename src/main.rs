@@ -70,6 +70,7 @@ mod state {
     #[derive(Clone)]
     pub struct Shared {
         inner: Arc<Inner>,
+        current_rev: Rev,
     }
 
     struct Inner {
@@ -79,6 +80,27 @@ mod state {
 
     #[derive(Debug, Clone, Copy)]
     struct Failed;
+
+    enum BuildResult {
+        DependencyFailed,
+        Completed(Result<(Thing, Answer, Vec<Key>), Report>),
+    }
+
+    type Thing = Box<dyn Any + Send + Sync + 'static>;
+
+    enum Answer {
+        DidNotNeedToRecompute,
+        RecomputedDifferent(Vec<u8>),
+        RecomputedSame,
+    }
+
+    struct Stored {
+        built: Rev,
+        changed: Rev,
+        failed: bool,
+        witness: Vec<u8>,
+        depends: Vec<Key>,
+    }
 
     impl Shared {
         fn things(&self) -> &DashMap<Key, Status> {
@@ -124,10 +146,7 @@ mod state {
                         // value into another function?)
                         vac.insert(Status::Running(notify.clone()));
                     }
-                    let result = self.build_key(key).await;
-                    if let Err(ref e) = result {
-                        eprintln!("{}", e)
-                    }
+                    let result = self.update_key(key).await;
                     let res = result.as_ref().cloned().map_err(|_| ());
                     {
                         // Release the reference into the map (write lock) before waking up dependents. Again, it's
@@ -140,7 +159,74 @@ mod state {
             }
         }
 
-        async fn build_key(&self, key: Key) -> Result<Value, Report> {
+        async fn update_key(&self, key: Key) -> Result<Value, Report> {
+            let old_stored = self
+                .get_stored(key)
+                .await
+                .expect("error fetching key from database");
+            let result = self.build_key(key, &old_stored).await;
+            match result {
+                BuildResult::DependencyFailed => Err(Report::msg("dependency failed")),
+                BuildResult::Completed(result) => {
+                    let (val, new_stored) = match result {
+                        Ok((thing, answer, depends)) => match answer {
+                            Answer::RecomputedDifferent(witness) => (
+                                Ok(Value {
+                                    changed: self.current_rev,
+                                    value: thing.into(),
+                                }),
+                                Stored {
+                                    witness,
+                                    changed: self.current_rev,
+                                    built: self.current_rev,
+                                    failed: false,
+                                    depends,
+                                },
+                            ),
+                            Answer::RecomputedSame => (
+                                Ok(Value {
+                                    changed: old_stored.changed,
+                                    value: thing.into(),
+                                }),
+                                Stored {
+                                    failed: false,
+                                    built: self.current_rev,
+                                    depends,
+                                    ..old_stored
+                                },
+                            ),
+                            Answer::DidNotNeedToRecompute => (
+                                Ok(Value {
+                                    changed: old_stored.changed,
+                                    value: thing.into(),
+                                }),
+                                Stored {
+                                    failed: false,
+                                    built: self.current_rev,
+                                    ..old_stored
+                                },
+                            ),
+                        },
+                        Err(err) => {
+                            eprintln!("{}", err);
+                            (
+                                Err(err),
+                                Stored {
+                                    failed: true,
+                                    ..old_stored
+                                },
+                            )
+                        }
+                    };
+                    self.put_stored(new_stored)
+                        .await
+                        .expect("error writing to database");
+                    val
+                }
+            }
+        }
+
+        async fn build_key(&self, key: Key, stored: &Stored) -> BuildResult {
             todo!()
         }
 
@@ -175,6 +261,14 @@ mod state {
         async fn get_depends(&self, key: Key) -> Result<Vec<Key>, Report> {
             todo!()
         }
+
+        async fn get_stored(&self, key: Key) -> Result<Stored, Report> {
+            todo!()
+        }
+
+        async fn put_stored(&self, new_stored: Stored) -> Result<(), Report> {
+            todo!()
+        }
     }
 
     pub enum DependencyStatus {
@@ -193,7 +287,6 @@ mod state {
 
     #[derive(Debug, Clone)]
     pub struct Value {
-        built: Rev,
         changed: Rev,
         value: Arc<dyn Any + Send + Sync + 'static>,
     }
