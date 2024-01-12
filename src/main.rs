@@ -77,11 +77,14 @@ mod state {
         pool: Pool,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct Failed;
+
     impl Shared {
         fn things(&self) -> &DashMap<Key, Status> {
             &self.inner.things
         }
-        pub(crate) async fn wait_for_key(&self, key: Key) -> Result<Rev, Arc<Report>> {
+        pub async fn wait_for_key(&self, key: Key) -> Result<Value, ()> {
             fn get_result_rev_changed<E: Clone>(res: &Result<Value, E>) -> Result<Rev, E> {
                 match res {
                     Ok(status) => Ok(status.changed),
@@ -103,25 +106,27 @@ mod state {
                             notify.notified().await;
                             let val = self.things().get(&key);
                             match val.as_deref() {
-                                Some(Status::Finished(result)) => get_result_rev_changed(result),
+                                Some(Status::Finished(result)) => {
+                                    result.as_ref().cloned().map_err(|_| ())
+                                }
                                 oh_no => panic!("Oh no! {:?}", oh_no),
                             }
                         }
-                        Status::Finished(result) => get_result_rev_changed(result),
+                        Status::Finished(ref result) => result.as_ref().cloned().map_err(|_| ()),
                     }
                 }
                 Entry::Vacant(vac) => {
                     let notify = Arc::new(Notify::new());
                     {
                         // Drop the reference into the map (`VacantEntry::insert` consumes `self`), releasing the lock,
-                        // before awaiting
+                        // before awaiting. -- Is this necessary, though? When
                         vac.insert(Status::Running(notify.clone()));
                     }
-                    let result = self.build_key(key).await.map_err(Arc::new);
+                    let result = self.build_key(key).await;
                     if let Err(ref e) = result {
                         eprintln!("{}", e)
                     }
-                    let res = get_result_rev_changed(&result);
+                    let res = result.as_ref().cloned().map_err(|_| ());
                     {
                         // Release the reference into the map (write lock) before waking up dependents
                         *self.things().get_mut(&key).unwrap() = Status::Finished(result);
@@ -136,18 +141,32 @@ mod state {
             todo!()
         }
 
-        async fn check_depends(
-            &self,
-            key: Key,
-            last_built: Rev,
-        ) -> Result<DependencyStatus, Report> {
-            let deps = self.get_depends(key).await?;
+        async fn check_depends(&self, key: Key, last_built: Rev) -> DependencyStatus {
+            let deps = self
+                .get_depends(key)
+                .await
+                .expect("error fetching dependencies");
             let mut dep_tasks = JoinSet::new();
             for dep in deps {
                 let shared = self.clone();
                 dep_tasks.spawn(async move { shared.wait_for_key(dep).await });
             }
-            Ok(DependencyStatus::Same)
+            while let Some(result) = dep_tasks.join_next().await {
+                let value = result.expect("could not join dependency task");
+                match value {
+                    Ok(value) => {
+                        if value.changed > last_built {
+                            dep_tasks.detach_all();
+                            return DependencyStatus::Changed;
+                        }
+                    }
+                    Err(_) => {
+                        dep_tasks.detach_all();
+                        return DependencyStatus::Failed;
+                    }
+                }
+            }
+            DependencyStatus::Same
         }
 
         async fn get_depends(&self, key: Key) -> Result<Vec<Key>, Report> {
@@ -158,26 +177,35 @@ mod state {
     pub enum DependencyStatus {
         Changed,
         Same,
+        Failed,
     }
 
     #[derive(Debug)]
     enum Status {
         Running(Arc<Notify>),
-        Finished(Result<Value, Arc<Report>>),
+        Finished(Result<Value, Report>),
     }
 
-    #[derive(Debug)]
-    struct Value {
+    pub struct DependencyFailed;
+
+    #[derive(Debug, Clone)]
+    pub struct Value {
         built: Rev,
         changed: Rev,
-        value: Box<dyn Any + Send + Sync + 'static>,
+        value: Arc<dyn Any + Send + Sync + 'static>,
     }
 
     #[derive(Debug, Eq, PartialEq, Clone, Copy)]
-    pub(crate) struct Rev(i64);
+    pub struct Rev(i64);
+
+    impl PartialOrd for Rev {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            self.0.partial_cmp(&other.0)
+        }
+    }
 
     #[derive(Hash, Eq, PartialEq, Clone, Debug, Copy)]
-    pub(crate) struct Key(i64);
+    pub struct Key(i64);
 }
 
 mod connection_pool {
@@ -206,7 +234,7 @@ mod connection_pool {
             conns.push(conn);
         }
 
-        pub(crate) async fn acquire(&self) -> Result<PooledConnection<'_>, Report> {
+        pub async fn acquire(&self) -> Result<PooledConnection<'_>, Report> {
             let permit = self.semaphore.acquire().await?;
             let conn = {
                 let mut conns = self.connections.lock().unwrap();
@@ -226,12 +254,12 @@ mod connection_pool {
         }
     }
 
-    pub(crate) struct Pool {
+    pub struct Pool {
         semaphore: Semaphore,
         connections: Mutex<Vec<Connection>>,
     }
 
-    pub(crate) struct PooledConnection<'a> {
+    pub struct PooledConnection<'a> {
         connection: Option<Connection>,
         permit: SemaphorePermit<'a>,
         pool: &'a Pool,
