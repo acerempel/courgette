@@ -119,7 +119,9 @@ mod state {
                     let notify = Arc::new(Notify::new());
                     {
                         // Drop the reference into the map (`VacantEntry::insert` consumes `self`), releasing the lock,
-                        // before awaiting. -- Is this necessary, though? When
+                        // before awaiting. -- Is this necessary, though? When exactly does the result of calling this
+                        // function get dropped (given that it's not stored in a variable or a temporary or passed by
+                        // value into another function?)
                         vac.insert(Status::Running(notify.clone()));
                     }
                     let result = self.build_key(key).await;
@@ -128,7 +130,8 @@ mod state {
                     }
                     let res = result.as_ref().cloned().map_err(|_| ());
                     {
-                        // Release the reference into the map (write lock) before waking up dependents
+                        // Release the reference into the map (write lock) before waking up dependents. Again, it's
+                        // not clear to me whether introducing a new scope here is actually necessary to do this.
                         *self.things().get_mut(&key).unwrap() = Status::Finished(result);
                     }
                     notify.notify_waiters();
