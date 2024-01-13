@@ -227,24 +227,26 @@ mod state {
         }
 
         async fn build_key(&self, key: Key, stored: &Stored) -> BuildResult {
-            todo!()
+            let status = self.check_depends(key, stored).await;
+            match status {
+                DependencyStatus::Failed => BuildResult::DependencyFailed,
+                DependencyStatus::Changed => todo!(),
+                DependencyStatus::Same => todo!(),
+            }
         }
 
-        async fn check_depends(&self, key: Key, last_built: Rev) -> DependencyStatus {
-            let deps = self
-                .get_depends(key)
-                .await
-                .expect("error fetching dependencies");
+        async fn check_depends<'a>(&self, key: Key, stored: &'a Stored) -> DependencyStatus {
             let mut dep_tasks = JoinSet::new();
-            for dep in deps {
+            for dep in &stored.depends {
                 let shared = self.clone();
-                dep_tasks.spawn(async move { shared.wait_for_key(dep).await });
+                let dep = *dep;
+                dep_tasks.spawn(Box::pin(async move { shared.wait_for_key(dep).await }));
             }
             while let Some(result) = dep_tasks.join_next().await {
                 let value = result.expect("could not join dependency task");
                 match value {
                     Ok(value) => {
-                        if value.changed > last_built {
+                        if value.changed > stored.built {
                             dep_tasks.detach_all();
                             return DependencyStatus::Changed;
                         }
