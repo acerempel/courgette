@@ -57,6 +57,8 @@ mod parse_makefile {
 
 mod state {
     use std::any::Any;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Arc;
 
     use dashmap::mapref::entry::Entry;
@@ -235,29 +237,38 @@ mod state {
             }
         }
 
-        async fn check_depends<'a>(&self, key: Key, stored: &'a Stored) -> DependencyStatus {
-            let mut dep_tasks = JoinSet::new();
-            for dep in &stored.depends {
-                let shared = self.clone();
-                let dep = *dep;
-                dep_tasks.spawn(Box::pin(async move { shared.wait_for_key(dep).await }));
-            }
-            while let Some(result) = dep_tasks.join_next().await {
-                let value = result.expect("could not join dependency task");
-                match value {
-                    Ok(value) => {
-                        if value.changed > stored.built {
+        /// Returns a boxed future to break the cycle of recursive async functions
+        /// (so that it does not give rise to a cycle of recursive types).
+        fn check_depends<'a>(
+            &self,
+            key: Key,
+            stored: &'a Stored,
+        ) -> Pin<Box<dyn Future<Output = DependencyStatus> + Send + 'a>> {
+            let shared = self.clone();
+            Box::pin(async move {
+                let mut dep_tasks = JoinSet::new();
+                for dep in &stored.depends {
+                    let shared = shared.clone();
+                    let dep = *dep;
+                    dep_tasks.spawn(async move { shared.wait_for_key(dep).await });
+                }
+                while let Some(result) = dep_tasks.join_next().await {
+                    let value = result.expect("could not join dependency task");
+                    match value {
+                        Ok(value) => {
+                            if value.changed > stored.built {
+                                dep_tasks.detach_all();
+                                return DependencyStatus::Changed;
+                            }
+                        }
+                        Err(_) => {
                             dep_tasks.detach_all();
-                            return DependencyStatus::Changed;
+                            return DependencyStatus::Failed;
                         }
                     }
-                    Err(_) => {
-                        dep_tasks.detach_all();
-                        return DependencyStatus::Failed;
-                    }
                 }
-            }
-            DependencyStatus::Same
+                DependencyStatus::Same
+            })
         }
 
         async fn get_depends(&self, key: Key) -> Result<Vec<Key>, Report> {
