@@ -64,7 +64,7 @@ mod state {
     use dashmap::mapref::entry::Entry;
     use dashmap::DashMap;
     use eyre::Report;
-    use tokio::sync::Notify;
+    use tokio::sync::{oneshot, Notify};
     use tokio::task::JoinSet;
 
     use crate::connection_pool::Pool;
@@ -232,8 +232,10 @@ mod state {
             let status = self.check_depends(key, stored).await;
             match status {
                 DependencyStatus::Failed => BuildResult::DependencyFailed,
-                DependencyStatus::Changed => todo!(),
-                DependencyStatus::Same => todo!(),
+                DependencyStatus::Changed | DependencyStatus::Same => {
+                    let (sender, recv) = oneshot::channel();
+                    let ctx = Context::new(&self, sender);
+                }
             }
         }
 
