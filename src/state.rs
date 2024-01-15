@@ -27,7 +27,7 @@ struct Failed;
 
 enum BuildResult {
     DependencyFailed,
-    Completed(Result<(Thing, Answer, Vec<Key>), Report>),
+    Completed(Result<(Answer, Thing, Vec<Vec<Key>>), Report>),
 }
 
 type Thing = Box<dyn Any + Send + Sync + 'static>;
@@ -41,10 +41,14 @@ enum Answer {
 struct Stored {
     built: Rev,
     changed: Rev,
+    kty: KeyTypeId,
     failed: bool,
     witness: Vec<u8>,
-    depends: Vec<Key>,
+    depends: Vec<Vec<Key>>,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct KeyTypeId(i64);
 
 impl Shared {
     fn things(&self) -> &DashMap<Key, Status> {
@@ -113,7 +117,7 @@ impl Shared {
             BuildResult::DependencyFailed => Err(Report::msg("dependency failed")),
             BuildResult::Completed(result) => {
                 let (val, new_stored) = match result {
-                    Ok((thing, answer, depends)) => match answer {
+                    Ok((answer, thing, depends)) => match answer {
                         Answer::RecomputedDifferent(witness) => (
                             Ok(Value {
                                 changed: self.current_rev,
@@ -123,6 +127,7 @@ impl Shared {
                                 witness,
                                 changed: self.current_rev,
                                 built: self.current_rev,
+                                kty: old_stored.kty,
                                 failed: false,
                                 depends,
                             },
@@ -176,7 +181,13 @@ impl Shared {
             DependencyStatus::Failed => BuildResult::DependencyFailed,
             DependencyStatus::Changed | DependencyStatus::Same => {
                 let (sender, recv) = oneshot::channel();
-                let ctx = Context::new(&self, sender);
+                let mut ctx = Context::new(sender);
+                let builder = self.get_builder(stored.kty)(&mut ctx, &stored.witness, status);
+                let result = tokio::select! {
+                    completed = builder => BuildResult::Completed(completed.map(|(thing, ans)| (thing, ans, ctx.depends))),
+                    dep_failed = recv => BuildResult::DependencyFailed,
+                };
+                result
             }
         }
     }
@@ -190,24 +201,26 @@ impl Shared {
     ) -> Pin<Box<dyn Future<Output = DependencyStatus> + Send + 'a>> {
         let shared = self.clone();
         Box::pin(async move {
-            let mut dep_tasks = JoinSet::new();
-            for dep in &stored.depends {
-                let shared = shared.clone();
-                let dep = *dep;
-                dep_tasks.spawn(async move { shared.wait_for_key(dep).await });
-            }
-            while let Some(result) = dep_tasks.join_next().await {
-                let value = result.expect("could not join dependency task");
-                match value {
-                    Ok(value) => {
-                        if value.changed > stored.built {
-                            dep_tasks.detach_all();
-                            return DependencyStatus::Changed;
+            for par_deps in &stored.depends {
+                let mut dep_tasks = JoinSet::new();
+                for dep in par_deps {
+                    let shared = shared.clone();
+                    let dep = *dep;
+                    dep_tasks.spawn(async move { shared.wait_for_key(dep).await });
+                }
+                while let Some(result) = dep_tasks.join_next().await {
+                    let value = result.expect("could not join dependency task");
+                    match value {
+                        Ok(value) => {
+                            if value.changed > stored.built {
+                                dep_tasks.detach_all();
+                                return DependencyStatus::Changed;
+                            }
                         }
-                    }
-                    Err(_) => {
-                        dep_tasks.detach_all();
-                        return DependencyStatus::Failed;
+                        Err(_) => {
+                            dep_tasks.detach_all();
+                            return DependencyStatus::Failed;
+                        }
                     }
                 }
             }
@@ -225,6 +238,33 @@ impl Shared {
 
     async fn put_stored(&self, new_stored: Stored) -> Result<(), Report> {
         todo!()
+    }
+
+    fn get_builder(
+        &self,
+        kty: KeyTypeId,
+    ) -> Box<
+        dyn FnMut(
+            &mut Context,
+            &[u8],
+            DependencyStatus,
+        ) -> Pin<Box<dyn Future<Output = Result<(Answer, Thing), Report>> + Send>>,
+    > {
+        todo!()
+    }
+}
+
+pub struct Context {
+    sender: oneshot::Sender<()>,
+    depends: Vec<Vec<Key>>,
+}
+
+impl Context {
+    pub fn new(sender: oneshot::Sender<()>) -> Self {
+        Self {
+            sender,
+            depends: Vec::new(),
+        }
     }
 }
 
