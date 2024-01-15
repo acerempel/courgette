@@ -17,7 +17,7 @@ pub struct Shared {
 }
 
 struct Inner {
-    things: DashMap<Key, Status>,
+    things: DashMap<Id, Status>,
     pool: Pool,
 }
 
@@ -26,7 +26,7 @@ struct Failed;
 
 enum BuildResult {
     DependencyFailed,
-    Completed(Result<(Answer, Vec<Vec<Key>>), Report>),
+    Completed(Result<(Answer, Vec<Vec<Id>>), Report>),
 }
 
 enum Answer {
@@ -39,18 +39,17 @@ struct Stored {
     built: Rev,
     changed: Rev,
     failed: bool,
+    id: Id,
+    key: Vec<u8>,
     witness: Vec<u8>,
-    depends: Vec<Vec<Key>>,
+    depends: Vec<Vec<Id>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct KeyTypeId(i64);
-
 impl Shared {
-    fn things(&self) -> &DashMap<Key, Status> {
+    fn things(&self) -> &DashMap<Id, Status> {
         &self.inner.things
     }
-    pub async fn wait_for_key(&self, key: Key) -> Result<Value, ()> {
+    pub async fn wait_for_key(&self, key: Id) -> Result<Value, ()> {
         fn get_result_rev_changed<E: Clone>(res: &Result<Value, E>) -> Result<Rev, E> {
             match res {
                 Ok(status) => Ok(status.changed),
@@ -103,12 +102,12 @@ impl Shared {
         }
     }
 
-    async fn update_key(&self, key: Key) -> Result<Value, Report> {
+    async fn update_key(&self, id: Id) -> Result<Value, Report> {
         let old_stored = self
-            .get_stored(key)
+            .get_stored(id)
             .await
             .expect("error fetching key from database");
-        let result = self.build_key(key, &old_stored).await;
+        let result = self.build_key(id, &old_stored).await;
         match result {
             BuildResult::DependencyFailed => Err(Report::msg("dependency failed")),
             BuildResult::Completed(result) => {
@@ -120,6 +119,8 @@ impl Shared {
                             }),
                             Stored {
                                 witness,
+                                id,
+                                key: old_stored.key,
                                 changed: self.current_rev,
                                 built: self.current_rev,
                                 failed: false,
@@ -167,7 +168,7 @@ impl Shared {
         }
     }
 
-    async fn build_key(&self, key: Key, stored: &Stored) -> BuildResult {
+    async fn build_key(&self, key: Id, stored: &Stored) -> BuildResult {
         let status = self.check_depends(key, stored).await;
         match status {
             DependencyStatus::Failed => BuildResult::DependencyFailed,
@@ -188,7 +189,7 @@ impl Shared {
     /// (so that it does not give rise to a cycle of recursive types).
     fn check_depends<'a>(
         &self,
-        key: Key,
+        key: Id,
         stored: &'a Stored,
     ) -> Pin<Box<dyn Future<Output = DependencyStatus> + Send + 'a>> {
         let shared = self.clone();
@@ -220,11 +221,11 @@ impl Shared {
         })
     }
 
-    async fn get_depends(&self, key: Key) -> Result<Vec<Key>, Report> {
+    async fn get_depends(&self, key: Id) -> Result<Vec<Id>, Report> {
         todo!()
     }
 
-    async fn get_stored(&self, key: Key) -> Result<Stored, Report> {
+    async fn get_stored(&self, key: Id) -> Result<Stored, Report> {
         todo!()
     }
 
@@ -239,7 +240,7 @@ impl Shared {
 
 pub struct Context {
     sender: oneshot::Sender<()>,
-    depends: Vec<Vec<Key>>,
+    depends: Vec<Vec<Id>>,
 }
 
 impl Context {
@@ -280,4 +281,4 @@ impl PartialOrd for Rev {
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug, Copy)]
-pub struct Key(i64);
+pub struct Id(i64);
