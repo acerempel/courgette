@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -27,10 +26,8 @@ struct Failed;
 
 enum BuildResult {
     DependencyFailed,
-    Completed(Result<(Answer, Thing, Vec<Vec<Key>>), Report>),
+    Completed(Result<(Answer, Vec<Vec<Key>>), Report>),
 }
-
-type Thing = Box<dyn Any + Send + Sync + 'static>;
 
 enum Answer {
     DidNotNeedToRecompute,
@@ -41,7 +38,6 @@ enum Answer {
 struct Stored {
     built: Rev,
     changed: Rev,
-    kty: KeyTypeId,
     failed: bool,
     witness: Vec<u8>,
     depends: Vec<Vec<Key>>,
@@ -117,17 +113,15 @@ impl Shared {
             BuildResult::DependencyFailed => Err(Report::msg("dependency failed")),
             BuildResult::Completed(result) => {
                 let (val, new_stored) = match result {
-                    Ok((answer, thing, depends)) => match answer {
+                    Ok((answer, depends)) => match answer {
                         Answer::RecomputedDifferent(witness) => (
                             Ok(Value {
                                 changed: self.current_rev,
-                                value: thing.into(),
                             }),
                             Stored {
                                 witness,
                                 changed: self.current_rev,
                                 built: self.current_rev,
-                                kty: old_stored.kty,
                                 failed: false,
                                 depends,
                             },
@@ -135,7 +129,6 @@ impl Shared {
                         Answer::RecomputedSame => (
                             Ok(Value {
                                 changed: old_stored.changed,
-                                value: thing.into(),
                             }),
                             Stored {
                                 failed: false,
@@ -147,7 +140,6 @@ impl Shared {
                         Answer::DidNotNeedToRecompute => (
                             Ok(Value {
                                 changed: old_stored.changed,
-                                value: thing.into(),
                             }),
                             Stored {
                                 failed: false,
@@ -182,9 +174,9 @@ impl Shared {
             DependencyStatus::Changed | DependencyStatus::Same => {
                 let (sender, recv) = oneshot::channel();
                 let mut ctx = Context::new(sender);
-                let builder = self.get_builder(stored.kty)(&mut ctx, &stored.witness, status);
+                let builder = self.do_build(&mut ctx, &stored.witness, status);
                 let result = tokio::select! {
-                    completed = builder => BuildResult::Completed(completed.map(|(thing, ans)| (thing, ans, ctx.depends))),
+                    completed = builder => BuildResult::Completed(completed.map(|ans| (ans, ctx.depends))),
                     dep_failed = recv => BuildResult::DependencyFailed,
                 };
                 result
@@ -240,16 +232,7 @@ impl Shared {
         todo!()
     }
 
-    fn get_builder(
-        &self,
-        kty: KeyTypeId,
-    ) -> Box<
-        dyn FnMut(
-            &mut Context,
-            &[u8],
-            DependencyStatus,
-        ) -> Pin<Box<dyn Future<Output = Result<(Answer, Thing), Report>> + Send>>,
-    > {
+    async fn do_build(&self, ctx: &mut Context, witness: &[u8], status: DependencyStatus) -> Result<Answer, Report> {
         todo!()
     }
 }
@@ -285,7 +268,6 @@ pub struct DependencyFailed;
 #[derive(Debug, Clone)]
 pub struct Value {
     changed: Rev,
-    value: Arc<dyn Any + Send + Sync + 'static>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
